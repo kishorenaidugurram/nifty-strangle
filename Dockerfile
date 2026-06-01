@@ -1,13 +1,17 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system deps for building
+# Install full build toolchain (needed for SmartApi + PyCrypto compilation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
+    build-essential \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
+# Pre-install PyCrypto separately (it's a problematic build)
+RUN pip install --no-cache-dir pycrypto==2.6.1
+
+# Install all other Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
