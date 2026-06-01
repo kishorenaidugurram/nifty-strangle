@@ -34,7 +34,7 @@ CONFIG = {
     "std_dev": 2.0,          # 2σ strikes
     "stop_mult": 2.5,        # Close when premium reaches 2.5× credit
     "profit_target_pct": 0.15,  # Book when 15% credit remains (85% profit)
-    "lot_size": 75,          # Nifty weekly lot
+    "lot_size": 65,          # Nifty weekly lot (confirmed: Angel One position data shows lotsize=65)
     "strike_rounding": 50,   # Nifty strikes every 50 pts
     "entry_hour": 15,        # 3 PM
     "entry_minute": 25,      # 25 minutes

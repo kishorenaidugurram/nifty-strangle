@@ -32,7 +32,7 @@ import numpy as np
 # Must match bot.py config
 STOP_MULT = 2.5
 PROFIT_TARGET_PCT = 0.15
-LOT_SIZE = 75
+LOT_SIZE = 65
 
 # Market hours (IST)
 MARKET_OPEN = (9, 15)
