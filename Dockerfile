@@ -1,19 +1,23 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install deps
+# Install system deps for building
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project files (bot.py for order placement, railway_monitor.py for WS)
+# Copy project files
 COPY bot.py .
 COPY railway_monitor.py .
-# Copy bot.py's dependencies
 COPY strangle_calculator.py .
 
-# Railway sets PORT env var automatically
 ENV PYTHONUNBUFFERED=1
 
-# Run the WebSocket monitor
+EXPOSE 8080
+
 CMD ["python", "railway_monitor.py"]
