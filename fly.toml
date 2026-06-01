@@ -1,0 +1,13 @@
+app = "nifty-strangle"
+primary_region = "bom"  # Mumbai — closest to you
+
+[build]
+  image = "nifty-strangle"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false  # Keep alive 24/7 for WebSocket
+  auto_start_machines = true
+  min_machines_running = 1
+  max_machines_running = 1
