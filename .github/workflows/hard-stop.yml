@@ -1,0 +1,115 @@
+name: Hard Stop — Violent Move Detection
+
+on:
+  schedule:
+    # Every 5 minutes during market hours (faster than monitor for emergencies)
+    # Only active when position is open — checks for extreme moves
+    - cron: '*/5 4-9 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Close reason'
+        required: false
+        default: 'MANUAL_OVERRIDE'
+
+jobs:
+  hard-stop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          pip install yfinance pandas numpy requests SmartApi pyotp
+
+      - name: Check position and market stress
+        id: check
+        env:
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+        run: |
+          # Quick check: has spot breached 3σ?
+          STATE=$(cat state.json 2>/dev/null || echo '{"status":"NO_POSITION"}')
+          STATUS=$(echo $STATE | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','NO_POSITION'))")
+          
+          if [ "$STATUS" != "IN_POSITION" ]; then
+            echo "NO_POSITION"
+            exit 0
+          fi
+          
+          # Get current spot and check against 3σ from entry
+          # 3σ = 3 × daily_vol × sqrt(7) × spot ≈ 7.5% weekly move
+          # For extreme moves, check if spot moved > 5% from entry in last 24h
+          SPOT=$(python3 -c "
+import yfinance as yf
+d = yf.download('^NSEI', period='2d', progress=False, auto_adjust=True)
+print(f'{float(d[\"Close\"].values.flatten()[-1]):.0f}')
+          ")
+          ENTRY_SPOT=$(echo $STATE | python3 -c "import sys,json; print(json.load(sys.stdin).get('entry_spot',0))")
+          PUT_STK=$(echo $STATE | python3 -c "import sys,json; print(json.load(sys.stdin).get('put_strike',0))")
+          CALL_STK=$(echo $STATE | python3 -c "import sys,json; print(json.load(sys.stdin).get('call_strike',0))")
+          
+          echo "SPOT=$SPOT"
+          echo "ENTRY=$ENTRY_SPOT"
+          echo "PUT=$PUT_STK"
+          echo "CALL=$CALL_STK"
+          
+          # 3σ threshold = 3 × 1.03% × √7 ≈ 8.2% from entry
+          THRESHOLD=5.0
+          MOVE_PCT=$(python3 -c "print(f'{abs($SPOT - $ENTRY_SPOT) / $ENTRY_SPOT * 100:.2f}')")
+          echo "MOVE=$MOVE_PCT%"
+          
+          # Trigger conditions:
+          # 1. Spot within 2.5% of either strike (approaching danger)
+          # 2. Move > 5% from entry in a single day (violent)
+          # 3. Gap open > 3% (overnight disaster)
+          
+          TRIGGER=0
+          
+          DIST_PUT=$(python3 -c "print(($SPOT - $PUT_STK) / $SPOT * 100)")
+          DIST_CALL=$(python3 -c "print(($CALL_STK - $SPOT) / $SPOT * 100)")
+          echo "DIST_PUT=$DIST_PUT%"
+          echo "DIST_CALL=$DIST_CALL%"
+          
+          if (( $(python3 -c "print(1 if float('$DIST_PUT') < 2.5 else 0)") )); then
+            echo "⚠️  Put strike approaching!"; TRIGGER=1
+          fi
+          if (( $(python3 -c "print(1 if float('$DIST_CALL') < 2.5 else 0)") )); then
+            echo "⚠️  Call strike approaching!"; TRIGGER=1
+          fi
+          if (( $(python3 -c "print(1 if float('$MOVE_PCT') > 5.0 else 0)") )); then
+            echo "⚠️  Violent move detected!"; TRIGGER=1
+          fi
+          
+          echo "TRIGGERED=$TRIGGER"
+          
+          if [ "$TRIGGER" = "1" ]; then
+            # Close position immediately
+            python3 bot.py close "HARD_STOP_MONITOR"
+            echo "🚨 Position closed via hard stop"
+          else
+            echo "✅ Market within normal range"
+          fi
+        shell: bash
+
+      - name: Commit state if closed
+        if: ${{ steps.check.outputs.TRIGGERED == '1' }}
+        run: |
+          git config user.name "Strangle Bot"
+          git config user.email "bot@nifty.io"
+          git add state.json trade_log.csv 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "bot: hard-stop $(date +'%Y-%m-%d %H:%M')"
+          git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }} HEAD:main

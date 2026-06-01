@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Local config (not in GH — use secrets)
+.env
+*.env.local
+
+# Temp
+/tmp/
+*.log
+
+# State files that are committed (tracked in git, but don't commit by accident)
+# state.json and trade_log.csv are committed by the bot

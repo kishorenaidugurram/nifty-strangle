@@ -1,0 +1,80 @@
+name: Nightly Report
+
+on:
+  schedule:
+    # 8 PM IST = 14:30 UTC
+    - cron: '30 14 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          pip install yfinance pandas numpy requests
+
+      - name: Generate status report
+        id: report
+        env:
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+        run: |
+          python3 -c "
+import json
+from bot import run_status, get_india_vix, get_volatility
+
+status = run_status()
+vix = get_india_vix()
+vol = get_volatility() if not vix else None
+
+report = {
+    'date': '$(date +%Y-%m-%d)',
+    'position_status': status.get('status', 'NO_POSITION'),
+    'vix': vix,
+    'daily_vol_pct': round(vol * 100, 2) if vol else None,
+}
+
+if status.get('status') == 'IN_POSITION':
+    report['entry_spot'] = status.get('entry_spot')
+    report['last_spot'] = status.get('last_spot')
+    report['total_credit'] = status.get('total_credit')
+    report['stop_level'] = status.get('stop_level')
+    report['last_premium'] = status.get('last_premium')
+    report['expiry'] = status.get('expiry')
+    report['put_strike'] = status.get('put_strike')
+    report['call_strike'] = status.get('call_strike')
+
+trades = status.get('trades', [])
+if trades:
+    report['total_trades'] = len(trades)
+    report['wins'] = status.get('wins', 0)
+    report['losses'] = status.get('losses', 0)
+    report['win_rate'] = round(status.get('win_rate', 0), 1)
+    report['total_pnl'] = round(status.get('total_pnl', 0))
+
+print(json.dumps(report, indent=2))
+" > report.json
+
+      - name: Commit report
+        run: |
+          git config user.name "Strangle Bot"
+          git config user.email "bot@nifty.io"
+          git add report.json 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "bot: nightly report $(date +'%Y-%m-%d')"
+          git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }} HEAD:main

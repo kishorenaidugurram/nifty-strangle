@@ -1,0 +1,52 @@
+name: Entry — Open Weekly Strangle
+
+on:
+  schedule:
+    # Tuesday @ 3:20 PM IST = 9:50 AM UTC
+    - cron: '50 9 * * 2'
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Confirm entry'
+        required: true
+        default: 'yes'
+
+jobs:
+  entry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          pip install yfinance pandas numpy requests SmartApi pyotp
+
+      - name: Run entry check
+        id: entry
+        env:
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          python bot.py entry > entry_result.json
+
+      - name: Commit state
+        run: |
+          git config user.name "Strangle Bot"
+          git config user.email "bot@nifty.io"
+          git add state.json trade_log.csv entry_result.json 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "bot: entry $(date +'%Y-%m-%d')"
+          git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }} HEAD:main
