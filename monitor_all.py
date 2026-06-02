@@ -31,6 +31,23 @@ STOP_MULT = 2.5
 PROFIT_TARGET_PCT = 0.15
 DEFAULT_DAILY_VOL = 0.0092
 
+# Cache for support/resistance levels (20-day SMA)
+_sr_cache = {}
+
+def get_support_resistance(name, direction="PCS"):
+    """Get dynamic support (PCS) or resistance (CCS) level from 20-day SMA."""
+    if name in _sr_cache:
+        return _sr_cache[name]
+    try:
+        d = yf.download(f"{name}.NS", period="1mo", progress=False, auto_adjust=True)
+        if not d.empty:
+            sma20 = round(float(d['Close'].rolling(20).mean().values.flatten()[-1]), 1)
+            _sr_cache[name] = sma20
+            return sma20
+    except:
+        pass
+    return None
+
 # Telegram — set these as GH Actions secrets
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -235,46 +252,50 @@ def main():
             print(f"  Stop: ₹{stop_level:.2f} (2.5×) | Target: ₹{target_level:.2f} (15%)")
             
             # EXIT 0: Support/Resistance breach (PATTERN LEVEL) — early warning
+            # Uses 20-day SMA as dynamic support/resistance level
             if direction == "PCS":
-                # Support is roughly halfway between spot and short strike
-                support_level = round((spot + short_stk) / 2, 1)
+                support_level = get_support_resistance(name, direction="PCS")
+                if support_level is None:
+                    support_level = round((spot + short_stk) / 2, 1)  # fallback
                 buffer_to_support = (spot - support_level) / spot * 100 if spot > 0 else 0
                 pct_of_buffer_consumed = (1 - buffer_to_support / buffer) * 100 if buffer > 0 else 0
                 
-                print(f"  Support: ₹{support_level:.0f} (spot {buffer_to_support:.1f}% above — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
+                print(f"  Support (SMA20): ₹{support_level:.0f} (spot {buffer_to_support:.1f}% above — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
                 
                 if buffer_to_support < 2.0 and not breach_triggered and not stop_triggered:
-                    msg = f"🔸 EARLY WARNING — {name} PCS approaching support. Spot ₹{spot:.2f}, support ₹{support_level:.0f} ({buffer_to_support:.1f}% left). Pattern at risk."
+                    msg = f"🔸 EARLY WARNING — {name} PCS approaching support (SMA20: ₹{support_level:.0f}). Spot ₹{spot:.2f}, only {buffer_to_support:.1f}% above. Pattern at risk."
                     alerts.append(f"🔸 {msg}")
                     telegram_alerts.append(("WARNING", f"{position_summary}\n🔸 {msg}"))
                     print(f"  ⚠️ Layer 1 — Pattern breach WARNING")
                 elif buffer_to_support <= 0 and not breach_triggered:
-                    msg = f"🔴 PATTERN BREACH — {name} PCS: Spot ₹{spot:.2f} broke support ₹{support_level:.0f}. Pattern invalidated. Close spread."
+                    msg = f"🔴 PATTERN BREACH — {name} PCS: Spot ₹{spot:.2f} broke SMA20 support ₹{support_level:.0f}. Pattern invalidated. Close spread."
                     alerts.append(f"🔴 {msg}")
                     telegram_alerts.append(("CRITICAL", f"{position_summary}\n🔴 {msg}"))
                     print(f"  🔴 Layer 1 — Pattern BREACHED")
                 else:
-                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_support:.1f}% to support)")
+                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_support:.1f}% to SMA20 support)")
             else:
-                # Resistance is roughly halfway between spot and short strike
-                resistance_level = round((spot + short_stk) / 2, 1)
+                # For CCS, resistance is the same SMA20
+                resistance_level = get_support_resistance(name, direction="CCS")
+                if resistance_level is None:
+                    resistance_level = round((spot + short_stk) / 2, 1)  # fallback
                 buffer_to_resistance = (resistance_level - spot) / spot * 100 if spot > 0 else 0
                 pct_of_buffer_consumed = (1 - buffer_to_resistance / buffer) * 100 if buffer > 0 else 0
                 
-                print(f"  Resistance: ₹{resistance_level:.0f} (spot {buffer_to_resistance:.1f}% below — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
+                print(f"  Resistance (SMA20): ₹{resistance_level:.0f} (spot {buffer_to_resistance:.1f}% below — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
                 
                 if buffer_to_resistance < 2.0 and not breach_triggered and not stop_triggered:
-                    msg = f"🔸 EARLY WARNING — {name} CCS approaching resistance. Spot ₹{spot:.2f}, resistance ₹{resistance_level:.0f} ({buffer_to_resistance:.1f}% left). Pattern at risk."
+                    msg = f"🔸 EARLY WARNING — {name} CCS approaching resistance (SMA20: ₹{resistance_level:.0f}). Spot ₹{spot:.2f}, only {buffer_to_resistance:.1f}% below. Pattern at risk."
                     alerts.append(f"🔸 {msg}")
                     telegram_alerts.append(("WARNING", f"{position_summary}\n🔸 {msg}"))
                     print(f"  ⚠️ Layer 1 — Pattern breach WARNING")
                 elif buffer_to_resistance <= 0 and not breach_triggered:
-                    msg = f"🔴 PATTERN BREACH — {name} CCS: Spot ₹{spot:.2f} broke resistance ₹{resistance_level:.0f}. Pattern invalidated. Close spread."
+                    msg = f"🔴 PATTERN BREACH — {name} CCS: Spot ₹{spot:.2f} broke SMA20 resistance ₹{resistance_level:.0f}. Pattern invalidated. Close spread."
                     alerts.append(f"🔴 {msg}")
                     telegram_alerts.append(("CRITICAL", f"{position_summary}\n🔴 {msg}"))
                     print(f"  🔴 Layer 1 — Pattern BREACHED")
                 else:
-                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_resistance:.1f}% to resistance)")
+                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_resistance:.1f}% to SMA20 resistance)")
             
             # EXIT 1: Strike breach
             if direction == "PCS" and spot <= short_stk:
