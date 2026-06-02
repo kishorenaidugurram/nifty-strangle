@@ -27,6 +27,167 @@ import pyotp
 import requests
 
 # ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
+# EVENT CALENDAR — known black swan triggers
+# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
+
+# High-risk events that cause Nifty gaps >300 pts
+EVENTS = {
+    # US Macro — biggest Nifty mover
+    "NFP": {"label": "US Non-Farm Payrolls", "day": 5, "month": None, "risk": "HIGH",
+            "gap_range": (100, 500), "desc": "First Friday every month — biggest single-day macro event"},
+    "FOMC": {"label": "Fed Interest Rate Decision", "day": None, "month": None, "risk": "CRITICAL",
+             "gap_range": (300, 800), "desc": "8 meetings/yr. Dot plot shocks move Nifty 500-1000 pts"},
+    "CPI": {"label": "US CPI Release", "day": None, "month": None, "risk": "HIGH",
+            "gap_range": (200, 500), "desc": "Monthly inflation data — big gap risk"},
+    "PCE": {"label": "US PCE Inflation", "day": None, "month": None, "risk": "MEDIUM",
+            "gap_range": (100, 300), "desc": "Fed's preferred inflation gauge"},
+    
+    # India Macro
+    "RBI": {"label": "RBI Monetary Policy", "day": None, "month": None, "risk": "HIGH",
+            "gap_range": (200, 500), "desc": "Repo rate decision + stance — big mover"},
+    "BUDGET": {"label": "India Union Budget", "day": None, "month": None, "risk": "CRITICAL",
+               "gap_range": (500, 1200), "desc": "Single biggest India event — routinely gaps 600-1000 pts"},
+    "EARNINGS_SEASON": {"label": "Earnings Season (TCS/Infy anchor)", "day": None, "month": None, "risk": "HIGH",
+                        "gap_range": (200, 500), "desc": "Q1/Q2/Q3/Q4 result days for index heavyweights"},
+    
+    # Geopolitical
+    "US_ELECTION": {"label": "US Presidential Election", "day": None, "month": None, "risk": "CRITICAL",
+                    "gap_range": (500, 1500), "desc": "Nov 2026 midterms — volatility explosion Oct-Nov"},
+}
+
+def get_fomc_dates(year):
+    """Return known FOMC meeting dates for the year."""
+    # 2026 FOMC meetings
+    fomc_2026 = [
+        "2026-01-28", "2026-03-18", "2026-05-06", "2026-06-17",
+        "2026-07-29", "2026-09-16", "2026-11-04", "2026-12-16",
+    ]
+    fomc_2027 = [
+        "2027-01-27", "2027-03-17", "2027-05-05", "2027-06-16",
+        "2027-07-28", "2027-09-15", "2027-11-03", "2027-12-15",
+    ]
+    if year == 2026:
+        return [datetime.strptime(d, "%Y-%m-%d").date() for d in fomc_2026]
+    elif year == 2027:
+        return [datetime.strptime(d, "%Y-%m-%d").date() for d in fomc_2027]
+    return []
+
+
+def check_event_risk(check_date=None):
+    """
+    Scan upcoming calendar for high-risk events.
+    Returns list of events within the next N days with risk level.
+    """
+    if check_date is None:
+        check_date = datetime.now().date()
+    
+    year = check_date.year
+    events_found = []
+    
+    # FOMC dates
+    fomc_dates = get_fomc_dates(year)
+    # Also check next year if near Dec
+    if check_date.month == 12:
+        fomc_dates += get_fomc_dates(year + 1)
+    
+    for fdate in fomc_dates:
+        days_until = (fdate - check_date).days
+        if -1 <= days_until <= 14:  # 1 day before to 14 days ahead
+            risk = "CRITICAL" if days_until <= 1 else "HIGH"
+            events_found.append({
+                "event": "FOMC",
+                "label": "Fed Interest Rate Decision",
+                "date": fdate.strftime("%Y-%m-%d"),
+                "days_until": days_until,
+                "risk": risk,
+                "action": "PRE_CLOSE 1 DAY BEFORE" if days_until <= 1 else "WATCH",
+            })
+    
+    # NFP: first Friday of every month
+    for m in range(1, 13):
+        first_day = date(year, m, 1)
+        # First Friday
+        days_to_friday = (4 - first_day.weekday()) % 7
+        nfp_date = first_day + timedelta(days=days_to_friday)
+        days_until = (nfp_date - check_date).days
+        if 0 <= days_until <= 14:
+            risk = "HIGH" if days_until <= 2 else "MEDIUM"
+            events_found.append({
+                "event": "NFP",
+                "label": "US Non-Farm Payrolls",
+                "date": nfp_date.strftime("%Y-%m-%d"),
+                "days_until": days_until,
+                "risk": risk,
+                "action": "TIGHTEN STOP" if days_until <= 1 else "WATCH",
+            })
+    
+    # RBI policy — typically Wed/Thu, usually 4-6 weeks apart
+    # Approximate dates based on pattern
+    rbi_2026 = ["2026-02-05", "2026-04-08", "2026-06-03", "2026-08-06",
+                "2026-10-07", "2026-12-03"]
+    for rdate_str in rbi_2026:
+        rdate = datetime.strptime(rdate_str, "%Y-%m-%d").date()
+        days_until = (rdate - check_date).days
+        if 0 <= days_until <= 14:
+            events_found.append({
+                "event": "RBI",
+                "label": "RBI Monetary Policy",
+                "date": rdate.strftime("%Y-%m-%d"),
+                "days_until": days_until,
+                "risk": "HIGH",
+                "action": "PRE_CLOSE 1 DAY BEFORE" if days_until == 0 else "WATCH",
+            })
+    
+    # Budget — typically Feb 1
+    budget_date = date(year, 2, 1)
+    days_until = (budget_date - check_date).days
+    if 0 <= days_until <= 14:
+        events_found.append({
+            "event": "BUDGET",
+            "label": "India Union Budget",
+            "date": budget_date.strftime("%Y-%m-%d"),
+            "days_until": days_until,
+            "risk": "CRITICAL",
+            "action": "MANDATORY PRE_CLOSE 1 DAY BEFORE",
+        })
+    
+    # CPI — usually 10th-14th of each month
+    cpi_date = date(year, check_date.month, 12) if check_date.month <= 12 else None
+    if cpi_date:
+        days_until = (cpi_date - check_date).days
+        if 0 <= days_until <= 14:
+            events_found.append({
+                "event": "CPI",
+                "label": "US CPI Release",
+                "date": cpi_date.strftime("%Y-%m-%d"),
+                "days_until": days_until,
+                "risk": "HIGH",
+                "action": "TIGHTEN STOP",
+            })
+    
+    return events_found
+
+
+def should_pre_close(events, spot, put_strike, call_strike):
+    """
+    Determine if we should close the position early due to event risk.
+    Returns (should_close: bool, reason: str or None).
+    """
+    for ev in events:
+        # CRITICAL events with 0 days to go: close day before
+        if ev["risk"] == "CRITICAL" and ev["days_until"] <= 1:
+            return True, f"PRE_CLOSE: {ev['label']} ({ev['date']}) — gap risk too high"
+        
+        # HIGH events within 1 day with tight buffer
+        if ev["risk"] == "HIGH" and ev["days_until"] <= 1:
+            buffer = min(spot - put_strike, call_strike - spot)
+            max_gap = max(ev.get("gap_range", (200, 500)))
+            if buffer < max_gap:
+                return True, f"PRE_CLOSE: {ev['label']} ({ev['date']}) — buffer ({buffer}pts) < max gap ({max_gap}pts)"
+    
+    return False, None
+
+# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
 # CONFIG
 # ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
 
@@ -478,6 +639,13 @@ def run_entry_check():
     if vix is not None and vix > CONFIG["vix_threshold"]:
         return {"action": "SKIP", "reason": f"VIX {vix:.1f} > {CONFIG['vix_threshold']}, skipping"}
     
+    # Event risk check — skip if critical event within next 2 days
+    events = check_event_risk()
+    critical = [e for e in events if e["risk"] in ("CRITICAL", "HIGH") and e["days_until"] <= 1]
+    if critical:
+        reasons = "; ".join([f"{e['label']} on {e['date']} ({e['risk']})" for e in critical])
+        return {"action": "SKIP_EVENT", "reason": f"Event risk too high: {reasons}"}
+    
     # Connect
     creds = load_creds()
     obj = angel_connect(creds)
@@ -609,8 +777,14 @@ def run_monitor():
     reason = None
     close_orders = None
     
+    # 0. EVENT RISK — pre-close if macro event will gap the market
+    events = check_event_risk()
+    should_close, event_reason = should_pre_close(events, spot, state["put_strike"], state["call_strike"])
+    if should_close:
+        reason = event_reason
+    
     # 1. BREACH: spot at or outside strike
-    if spot >= state["call_strike"]:
+    if reason is None and spot >= state["call_strike"]:
         reason = "STRIKE_BREACH_CALL"
     elif spot <= state["put_strike"]:
         reason = "STRIKE_BREACH_PUT"
@@ -799,6 +973,19 @@ def run_status():
         result["losses"] = losses
         result["total_pnl"] = total_pnl
         result["win_rate"] = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+    
+    # Upcoming events
+    events = check_event_risk()
+    if events:
+        result["upcoming_events"] = []
+        for ev in events:
+            result["upcoming_events"].append({
+                "event": ev["label"],
+                "date": ev["date"],
+                "days_until": ev["days_until"],
+                "risk": ev["risk"],
+                "action": ev["action"],
+            })
     
     return result
 
