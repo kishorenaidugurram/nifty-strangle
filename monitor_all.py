@@ -31,22 +31,97 @@ STOP_MULT = 2.5
 PROFIT_TARGET_PCT = 0.15
 DEFAULT_DAILY_VOL = 0.0092
 
-# Cache for support/resistance levels (20-day SMA)
+# Cache for support/resistance levels (swing-low / swing-high clusters)
 _sr_cache = {}
 
+def swing_low_high(highs, lows, lookback=3):
+    """
+    Detect swing lows and highs.
+    Swing low: bar whose low is lower than both sides (lookback bars each way).
+    Swing high: bar whose high is higher than both sides.
+    Returns (swing_lows, swing_highs) — lists of (index, price) tuples.
+    """
+    swing_lows = []
+    swing_highs = []
+    n = len(highs)
+    for i in range(lookback, n - lookback):
+        # Swing low
+        is_swing_low = all(lows[i] < lows[i - j - 1] for j in range(lookback)) and \
+                       all(lows[i] < lows[i + j + 1] for j in range(lookback))
+        if is_swing_low:
+            swing_lows.append((i, lows[i]))
+        # Swing high
+        is_swing_high = all(highs[i] > highs[i - j - 1] for j in range(lookback)) and \
+                        all(highs[i] > highs[i + j + 1] for j in range(lookback))
+        if is_swing_high:
+            swing_highs.append((i, highs[i]))
+    return swing_lows, swing_highs
+
+def cluster_levels(points, tolerance=0.02):
+    """
+    Cluster nearby price levels within tolerance (default 2%).
+    Returns list of (cluster_price, count) sorted by strength.
+    """
+    if not points:
+        return []
+    sorted_pts = sorted(set(points))
+    clusters = [[sorted_pts[0]]]
+    for p in sorted_pts[1:]:
+        if abs(p - clusters[-1][0]) / max(clusters[-1][0], 1) <= tolerance:
+            clusters[-1].append(p)
+        else:
+            clusters.append([p])
+    # Return average price of each cluster, sorted by cluster size (strength)
+    result = [(round(sum(c) / len(c), 1), len(c)) for c in clusters]
+    result.sort(key=lambda x: (-x[1], -x[0]))  # Most votes first
+    return result
+
 def get_support_resistance(name, direction="PCS"):
-    """Get dynamic support (PCS) or resistance (CCS) level from 20-day SMA."""
+    """
+    Find real support/resistance from swing-low / swing-high clusters.
+    Returns the strongest cluster BELOW (for PCS) or ABOVE (for CCS) current price.
+    """
     if name in _sr_cache:
-        return _sr_cache[name]
+        return _sr_cache[name].get(direction)
+    
     try:
-        d = yf.download(f"{name}.NS", period="1mo", progress=False, auto_adjust=True)
-        if not d.empty:
-            sma20 = round(float(d['Close'].rolling(20).mean().values.flatten()[-1]), 1)
-            _sr_cache[name] = sma20
-            return sma20
-    except:
-        pass
-    return None
+        d = yf.download(f"{name}.NS", period="3mo", progress=False, auto_adjust=True)
+        if d.empty or len(d) < 20:
+            return None
+        
+        highs = d['High'].values.flatten()
+        lows = d['Low'].values.flatten()
+        close = float(d['Close'].values.flatten()[-1])
+        
+        swing_lows, swing_highs = swing_low_high(highs, lows, lookback=3)
+        
+        # Cluster swing prices
+        low_prices = [p for _, p in swing_lows]
+        high_prices = [p for _, p in swing_highs]
+        
+        support_clusters = cluster_levels(low_prices, tolerance=0.02)
+        resistance_clusters = cluster_levels(high_prices, tolerance=0.02)
+        
+        # Pick strongest cluster BELOW current price for support
+        best_support = None
+        for price, count in support_clusters:
+            if price < close:
+                best_support = price
+                break  # Highest cluster below price = nearest support
+        
+        # Pick strongest cluster ABOVE current price for resistance
+        best_resistance = None
+        all_resist = [(p, c) for p, c in resistance_clusters if p > close]
+        if all_resist:
+            best_resistance = all_resist[0][0]  # Highest cluster above price
+        
+        cache = {"PCS": best_support, "CCS": best_resistance}
+        _sr_cache[name] = cache
+        return cache.get(direction)
+    
+    except Exception as e:
+        print(f"  ⚠ SR calc error for {name}: {e}")
+        return None
 
 # Telegram — set these as GH Actions secrets
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -260,20 +335,20 @@ def main():
                 buffer_to_support = (spot - support_level) / spot * 100 if spot > 0 else 0
                 pct_of_buffer_consumed = (1 - buffer_to_support / buffer) * 100 if buffer > 0 else 0
                 
-                print(f"  Support (SMA20): ₹{support_level:.0f} (spot {buffer_to_support:.1f}% above — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
+                print(f"  Support (swing cluster): ₹{support_level:.0f} (spot {buffer_to_support:.1f}% above — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
                 
                 if buffer_to_support < 2.0 and not breach_triggered and not stop_triggered:
-                    msg = f"🔸 EARLY WARNING — {name} PCS approaching support (SMA20: ₹{support_level:.0f}). Spot ₹{spot:.2f}, only {buffer_to_support:.1f}% above. Pattern at risk."
+                    msg = f"🔸 EARLY WARNING — {name} PCS approaching swing-low cluster (₹{support_level:.0f}). Spot ₹{spot:.2f}, only {buffer_to_support:.1f}% above."
                     alerts.append(f"🔸 {msg}")
                     telegram_alerts.append(("WARNING", f"{position_summary}\n🔸 {msg}"))
                     print(f"  ⚠️ Layer 1 — Pattern breach WARNING")
                 elif buffer_to_support <= 0 and not breach_triggered:
-                    msg = f"🔴 PATTERN BREACH — {name} PCS: Spot ₹{spot:.2f} broke SMA20 support ₹{support_level:.0f}. Pattern invalidated. Close spread."
+                    msg = f"🔴 PATTERN BREACH — {name} PCS: Spot ₹{spot:.2f} broke swing-low support ₹{support_level:.0f}. Pattern invalidated."
                     alerts.append(f"🔴 {msg}")
                     telegram_alerts.append(("CRITICAL", f"{position_summary}\n🔴 {msg}"))
                     print(f"  🔴 Layer 1 — Pattern BREACHED")
                 else:
-                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_support:.1f}% to SMA20 support)")
+                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_support:.1f}% to swing-low cluster)")
             else:
                 # For CCS, resistance is the same SMA20
                 resistance_level = get_support_resistance(name, direction="CCS")
@@ -282,20 +357,20 @@ def main():
                 buffer_to_resistance = (resistance_level - spot) / spot * 100 if spot > 0 else 0
                 pct_of_buffer_consumed = (1 - buffer_to_resistance / buffer) * 100 if buffer > 0 else 0
                 
-                print(f"  Resistance (SMA20): ₹{resistance_level:.0f} (spot {buffer_to_resistance:.1f}% below — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
+                print(f"  Resistance (swing cluster): ₹{resistance_level:.0f} (spot {buffer_to_resistance:.1f}% below — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
                 
                 if buffer_to_resistance < 2.0 and not breach_triggered and not stop_triggered:
-                    msg = f"🔸 EARLY WARNING — {name} CCS approaching resistance (SMA20: ₹{resistance_level:.0f}). Spot ₹{spot:.2f}, only {buffer_to_resistance:.1f}% below. Pattern at risk."
+                    msg = f"🔸 EARLY WARNING — {name} CCS approaching swing-high cluster (₹{resistance_level:.0f}). Spot ₹{spot:.2f}, only {buffer_to_resistance:.1f}% below."
                     alerts.append(f"🔸 {msg}")
                     telegram_alerts.append(("WARNING", f"{position_summary}\n🔸 {msg}"))
                     print(f"  ⚠️ Layer 1 — Pattern breach WARNING")
                 elif buffer_to_resistance <= 0 and not breach_triggered:
-                    msg = f"🔴 PATTERN BREACH — {name} CCS: Spot ₹{spot:.2f} broke SMA20 resistance ₹{resistance_level:.0f}. Pattern invalidated. Close spread."
+                    msg = f"🔴 PATTERN BREACH — {name} CCS: Spot ₹{spot:.2f} broke swing-high resistance ₹{resistance_level:.0f}. Pattern invalidated."
                     alerts.append(f"🔴 {msg}")
                     telegram_alerts.append(("CRITICAL", f"{position_summary}\n🔴 {msg}"))
                     print(f"  🔴 Layer 1 — Pattern BREACHED")
                 else:
-                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_resistance:.1f}% to SMA20 resistance)")
+                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_resistance:.1f}% to swing-high cluster)")
             
             # EXIT 1: Strike breach
             if direction == "PCS" and spot <= short_stk:
