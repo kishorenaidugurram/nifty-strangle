@@ -380,9 +380,8 @@ def start_websocket():
             
             # Create WebSocket
             ws = SmartWebSocket(
-                api_key=CREDS["api_key"],
-                client_code=CREDS["client_code"],
-                feed_token=feed_token,
+                feed_token,
+                CREDS["client_code"],
             )
             
             ws.on_ticks = on_ws_tick
