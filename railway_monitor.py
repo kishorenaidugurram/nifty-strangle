@@ -21,7 +21,8 @@ except ImportError:
     FLASK_AVAILABLE = False
     print("⚠️  Flask not installed — healthcheck endpoint disabled")
 
-from SmartApi import SmartConnect, SmartWebSocket
+from SmartApi import SmartConnect
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 import pyotp
 import yfinance as yf
 import pandas as pd
@@ -161,7 +162,7 @@ def gh_append_trade_log(trade_data):
 # ─── ANGEL ONE ─────────────────────────────────────────────────────────────
 
 def angel_login():
-    """Login to Angel One. Returns (obj, feed_token)."""
+    """Login to Angel One. Returns (obj, feed_token, jwt_token)."""
     obj = SmartConnect(api_key=CREDS["api_key"])
     resp = obj.generateSession(
         CREDS["client_code"],
@@ -171,8 +172,10 @@ def angel_login():
     if not resp.get("status"):
         raise Exception(f"Login failed: {resp}")
     
-    feed_token = resp.get("data", {}).get("feedToken", "")
-    return obj, feed_token
+    data = resp.get("data", {})
+    feed_token = data.get("feedToken", "")
+    jwt_token = data.get("jwtToken", "")
+    return obj, feed_token, jwt_token
 
 
 def get_spot_and_premiums(obj):
@@ -214,35 +217,34 @@ def get_spot_and_premiums(obj):
 
 # ─── WEBSOCKET ─────────────────────────────────────────────────────────────
 
-def on_ws_connect(ws_instance):
-    """Called when WebSocket connects."""
-    global ws_connected
+def on_ws_connect(wsapp):
+    """Called when WebSocket connects (wsapp is raw WebSocketApp)."""
+    global ws_connected, ws
     with ws_lock:
         ws_connected = True
     print("✅ WebSocket connected — real-time feed active", flush=True)
     
-    # Subscribe to tokens
+    # Subscribe to tokens (LTP mode = 1) — use global ws which is SmartWebSocketV2
+    tokens = []
+    tokens.append({"exchangeType": 1, "tokens": [NIFTY_SPOT_TOKEN]})  # NSE Nifty
     with state_lock:
-        tokens = []
-        tokens.append({"exchangeType": 1, "tokens": [NIFTY_SPOT_TOKEN]})  # NSE Nifty
         if state.get("put_token"):
             tokens.append({"exchangeType": 2, "tokens": [state["put_token"], state["call_token"]]})  # NFO options
-        action = state.get("status", "NO_POSITION")
     
-    if tokens:
+    if tokens and ws is not None:
         try:
-            ws_instance.subscribe(*tokens)
+            ws.subscribe("CORR1", 1, tokens)  # correlation_id, LTP mode, tokens
             print(f"📡 Subscribed to {len(tokens)} token groups", flush=True)
         except Exception as e:
             print(f"⚠️  Subscribe error: {e}", flush=True)
 
 
-def on_ws_close(ws_instance, code, reason):
+def on_ws_close(ws_instance):
     """Called when WebSocket disconnects."""
     global ws_connected
     with ws_lock:
         ws_connected = False
-    print(f"🔌 WebSocket disconnected: {code} {reason}", flush=True)
+    print("🔌 WebSocket disconnected", flush=True)
 
 
 def on_ws_error(ws_instance, error):
@@ -252,22 +254,19 @@ def on_ws_error(ws_instance, error):
 
 def on_ws_tick(ws_instance, tick):
     """
-    Called on EVERY tick from Angel One WebSocket.
-    This fires in real-time — 0 latency.
-    
-    tick format: {
-        "token": "99926000",
-        "ltp": 23382.6,
-        "ltq": 25,
-        "exchange": 1,  # 1=NSE, 2=NFO
+    Called on EVERY tick from Angel One V2 WebSocket.
+    tick keys:
+        token, exchange_type, subscription_mode, last_traded_price (paise)
+        last_traded_quantity, average_traded_price, volume_trade_for_the_day
         ...
-    }
+    LTP needs /100 to get rupees.
     """
     global state
     
     token = str(tick.get("token", ""))
-    ltp = float(tick.get("ltp", 0))
-    exchange = tick.get("exchange", 0)
+    # V2 LTP is in paise (divide by 100)
+    ltp = float(tick.get("last_traded_price", 0)) / 100.0
+    exchange = tick.get("exchange_type", 0)
     
     with state_lock:
         if state.get("status") != "IN_POSITION":
@@ -320,7 +319,7 @@ def on_ws_tick(ws_instance, tick):
         
         # Close position via Angel One REST API
         try:
-            obj, _ = angel_login()
+            obj, _, _ = angel_login()
             from bot import place_order  # Reuse bot.py's order function
             
             with state_lock:
@@ -375,21 +374,25 @@ def start_websocket():
     
     while running:
         try:
-            # Login for feed token
-            obj, feed_token = angel_login()
+            # Login for tokens
+            obj, feed_token, jwt_token = angel_login()
             
-            # Create WebSocket
-            ws = SmartWebSocket(
-                feed_token,
-                CREDS["client_code"],
+            # Create V2 WebSocket
+            # Strip "Bearer " prefix if present
+            auth_token = jwt_token.replace("Bearer ", "")
+            ws = SmartWebSocketV2(
+                auth_token=auth_token,
+                api_key=CREDS["api_key"],
+                client_code=CREDS["client_code"],
+                feed_token=feed_token,
             )
             
-            ws.on_ticks = on_ws_tick
-            ws.on_connect = on_ws_connect
+            ws.on_open = on_ws_connect
             ws.on_close = on_ws_close
             ws.on_error = on_ws_error
+            ws.on_data = on_ws_tick
             
-            print("🔌 Connecting WebSocket...", flush=True)
+            print("🔌 Connecting WebSocket V2...", flush=True)
             ws.connect()  # This blocks until disconnect
             
         except Exception as e:
@@ -510,7 +513,7 @@ def main():
                     continue  # WS is active, skip REST
             
             try:
-                obj, _ = angel_login()
+                obj, _, _ = angel_login()
                 spot, put_ltp, call_ltp = get_spot_and_premiums(obj)
                 obj.terminateSession(CREDS["client_code"])
                 
@@ -527,11 +530,21 @@ def main():
     rest_thread = threading.Thread(target=rest_fallback_loop, daemon=True)
     rest_thread.start()
     
-    # Flask healthcheck server
+    # Flask healthcheck server — use configurable port, default 8080 on Railway
     port = int(os.environ.get("PORT", 8080))
     if app:
-        print(f"🌐 Healthcheck server on port {port}", flush=True)
-        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        # Try port, fallback to random if busy
+        try:
+            print(f"🌐 Healthcheck server on port {port}", flush=True)
+            app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        except OSError:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("0.0.0.0", 0))
+            port = sock.getsockname()[1]
+            sock.close()
+            print(f"🌐 Healthcheck server on port {port} (fallback, 8080 busy)", flush=True)
+            app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     else:
         # No Flask — just keep main thread alive
         print("⚠️  Flask not installed, running headless", flush=True)
