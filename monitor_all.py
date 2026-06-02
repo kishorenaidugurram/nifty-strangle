@@ -26,6 +26,7 @@ CREDS = {
     "client_code": os.environ.get("ANGEL_CLIENT_CODE", "G188451"),
     "pin": os.environ.get("ANGEL_PIN", "1980"),
     "totp": os.environ.get("ANGEL_TOTP_SECRET", "LIONHZIIQLSN7MZEDLRSPE5HE4"),
+    "static_ip": os.environ.get("ANGEL_STATIC_IP", "49.43.230.169"),
 }
 
 STOP_MULT = 2.5
@@ -177,7 +178,7 @@ def main():
     
     # Login
     try:
-        obj = SmartConnect(api_key=CREDS["api_key"])
+        obj = SmartConnect(api_key=CREDS["api_key"], clientPublicIP=CREDS["static_ip"])
         resp = obj.generateSession(
             CREDS["client_code"], CREDS["pin"],
             pyotp.TOTP(CREDS["totp"]).now()

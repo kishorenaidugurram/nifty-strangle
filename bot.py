@@ -298,6 +298,7 @@ def load_creds():
     creds = {}
     for var in env_vars:
         creds[var] = os.environ.get(var, "")
+    creds["ANGEL_STATIC_IP"] = os.environ.get("ANGEL_STATIC_IP", "")
     
     # Fallback: load from .env file (local dev)
     if not all(creds.values()):
@@ -316,8 +317,13 @@ def load_creds():
 
 
 def angel_connect(creds):
-    """Return authenticated SmartConnect object."""
-    obj = SmartConnect(api_key=creds["ANGEL_API_KEY"])
+    """Connect to Angel One SmartAPI with optional public IP override."""
+    # Use static IP override if configured, otherwise let library auto-detect
+    static_ip = creds.get("ANGEL_STATIC_IP", "")
+    if static_ip:
+        obj = SmartConnect(api_key=creds["ANGEL_API_KEY"], clientPublicIP=static_ip)
+    else:
+        obj = SmartConnect(api_key=creds["ANGEL_API_KEY"])
     resp = obj.generateSession(
         creds["ANGEL_CLIENT_CODE"], 
         creds["ANGEL_PIN"], 

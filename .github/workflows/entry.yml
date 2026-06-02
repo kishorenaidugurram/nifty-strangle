@@ -39,6 +39,7 @@ jobs:
           ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
           ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
           ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+          ANGEL_STATIC_IP: ${{ secrets.ANGEL_STATIC_IP }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           python bot.py entry > entry_result.json
