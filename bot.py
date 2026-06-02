@@ -35,6 +35,7 @@ CONFIG = {
     "stop_mult": 2.5,        # Close when premium reaches 2.5× credit
     "profit_target_pct": 0.15,  # Book when 15% credit remains (85% profit)
     "lot_size": 65,          # Nifty weekly lot
+    "position_lots": 2,      # Number of lots to trade (default 2 for initial observation)
     "strike_rounding": 50,   # Nifty strikes every 50 pts
     "entry_hour": 15,        # 3 PM
     "entry_minute": 25,      # 25 minutes
@@ -62,6 +63,10 @@ CONFIG = {
 NIFTY_SPOT_TOKEN = "99926000"
 
 BOT_DIR = Path(__file__).parent.resolve()
+
+def order_qty():
+    """Total quantity to trade = lot_size × position_lots."""
+    return CONFIG["lot_size"] * CONFIG["position_lots"]
 
 # ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
 # CREDENTIALS
@@ -511,9 +516,9 @@ def run_entry_check():
     
     # Place orders
     put_order = place_order(obj, put_symbol, strikes["put_token"], 
-                            CONFIG["lot_size"], "SELL")
-    call_order = place_order(obj, call_symbol, strikes["call_token"], 
-                             CONFIG["lot_size"], "SELL")
+                            order_qty(), "SELL")
+    call_order = place_order(obj, call_symbol, strikes["call_token"],
+                             order_qty(), "SELL")
     
     now = datetime.now()
     
@@ -627,8 +632,8 @@ def run_monitor():
     
     # Execute close if triggered
     if reason:
-        put_qty = CONFIG["lot_size"]
-        call_qty = CONFIG["lot_size"]
+        put_qty = order_qty()
+        call_qty = order_qty()
         
         put_close = place_order(obj, state["put_symbol"], state["put_token"],
                                 put_qty, "BUY")  # Buy to close
@@ -638,7 +643,7 @@ def run_monitor():
         # Calculate P&L
         exit_premium = put_ltp + call_ltp
         pnl_per_share = total_credit - exit_premium
-        pnl_total = pnl_per_share * CONFIG["lot_size"]
+        pnl_total = pnl_per_share * order_qty()
         
         # Log trade
         trade_data = {
@@ -720,13 +725,13 @@ def run_force_close(reason="MANUAL"):
     total_credit = state["total_credit"]
     
     pnl_per_share = total_credit - exit_premium
-    pnl_total = pnl_per_share * CONFIG["lot_size"]
+    pnl_total = pnl_per_share * order_qty()
     
     # Close both legs
     place_order(obj, state["put_symbol"], state["put_token"],
-                CONFIG["lot_size"], "BUY")
+                order_qty(), "BUY")
     place_order(obj, state["call_symbol"], state["call_token"],
-                CONFIG["lot_size"], "BUY")
+                order_qty(), "BUY")
     
     trade_data = {
         "entry_date": state["entry_time"],
