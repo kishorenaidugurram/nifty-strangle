@@ -234,6 +234,48 @@ def main():
             target_level = credit * PROFIT_TARGET_PCT
             print(f"  Stop: ₹{stop_level:.2f} (2.5×) | Target: ₹{target_level:.2f} (15%)")
             
+            # EXIT 0: Support/Resistance breach (PATTERN LEVEL) — early warning
+            if direction == "PCS":
+                # Support is roughly halfway between spot and short strike
+                support_level = round((spot + short_stk) / 2, 1)
+                buffer_to_support = (spot - support_level) / spot * 100 if spot > 0 else 0
+                pct_of_buffer_consumed = (1 - buffer_to_support / buffer) * 100 if buffer > 0 else 0
+                
+                print(f"  Support: ₹{support_level:.0f} (spot {buffer_to_support:.1f}% above — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
+                
+                if buffer_to_support < 2.0 and not breach_triggered and not stop_triggered:
+                    msg = f"🔸 EARLY WARNING — {name} PCS approaching support. Spot ₹{spot:.2f}, support ₹{support_level:.0f} ({buffer_to_support:.1f}% left). Pattern at risk."
+                    alerts.append(f"🔸 {msg}")
+                    telegram_alerts.append(("WARNING", f"{position_summary}\n🔸 {msg}"))
+                    print(f"  ⚠️ Layer 1 — Pattern breach WARNING")
+                elif buffer_to_support <= 0 and not breach_triggered:
+                    msg = f"🔴 PATTERN BREACH — {name} PCS: Spot ₹{spot:.2f} broke support ₹{support_level:.0f}. Pattern invalidated. Close spread."
+                    alerts.append(f"🔴 {msg}")
+                    telegram_alerts.append(("CRITICAL", f"{position_summary}\n🔴 {msg}"))
+                    print(f"  🔴 Layer 1 — Pattern BREACHED")
+                else:
+                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_support:.1f}% to support)")
+            else:
+                # Resistance is roughly halfway between spot and short strike
+                resistance_level = round((spot + short_stk) / 2, 1)
+                buffer_to_resistance = (resistance_level - spot) / spot * 100 if spot > 0 else 0
+                pct_of_buffer_consumed = (1 - buffer_to_resistance / buffer) * 100 if buffer > 0 else 0
+                
+                print(f"  Resistance: ₹{resistance_level:.0f} (spot {buffer_to_resistance:.1f}% below — {pct_of_buffer_consumed:.0f}% of buffer consumed)")
+                
+                if buffer_to_resistance < 2.0 and not breach_triggered and not stop_triggered:
+                    msg = f"🔸 EARLY WARNING — {name} CCS approaching resistance. Spot ₹{spot:.2f}, resistance ₹{resistance_level:.0f} ({buffer_to_resistance:.1f}% left). Pattern at risk."
+                    alerts.append(f"🔸 {msg}")
+                    telegram_alerts.append(("WARNING", f"{position_summary}\n🔸 {msg}"))
+                    print(f"  ⚠️ Layer 1 — Pattern breach WARNING")
+                elif buffer_to_resistance <= 0 and not breach_triggered:
+                    msg = f"🔴 PATTERN BREACH — {name} CCS: Spot ₹{spot:.2f} broke resistance ₹{resistance_level:.0f}. Pattern invalidated. Close spread."
+                    alerts.append(f"🔴 {msg}")
+                    telegram_alerts.append(("CRITICAL", f"{position_summary}\n🔴 {msg}"))
+                    print(f"  🔴 Layer 1 — Pattern BREACHED")
+                else:
+                    print(f"  ✅ Layer 1 — Pattern intact ({buffer_to_resistance:.1f}% to resistance)")
+            
             # EXIT 1: Strike breach
             if direction == "PCS" and spot <= short_stk:
                 breach_triggered = True
