@@ -212,11 +212,22 @@ CONFIG = {
     "state_file": "state.json",
     "trade_log": "trade_log.csv",
     "angel_env": "/mnt/c/Users/Admin/Documents/Claude/Projects/NSE_PCS_CCS_TO_BE_DEPLOYED/.env",
-    # Premium-targeted strike selection (replaces fixed 2σ)
-    "premium_target_min": 8,    # Minimum ₹ per leg (avoid too-thin options)
-    "premium_target_max": 25,   # Maximum ₹ per leg (avoid overpriced)
+    # Premium-targeted strike selection
+    "premium_target_min": 8,    # Minimum ₹ per leg
+    "premium_target_max": 25,   # Maximum ₹ per leg
     "premium_balance_pct": 30,  # Max % difference between leg premiums
     "vol_smile_search": 0.5,    # ±σ range to search around anchor
+    # EWMA volatility (RiskMetrics λ=0.94)
+    "ewma_lambda": 0.94,
+    # Vol-regime sizing — adjust lots based on VIX
+    "vix_low_lots": 3,       # Lots when VIX < 14 (low vol, cherry)
+    "vix_mid_lots": 2,       # Lots when VIX 14-18 (normal)
+    "vix_high_lots": 1,      # Lots when VIX 18-22 (elevated)
+    "vix_skip_lots": 0,      # Skip when VIX > 25 (same as threshold)
+    # Skew adjustment — puts trade richer than calls on Nifty
+    "skew_base": 0.08,       # Base skew factor (8% wider put buffer)
+    # Delta exit threshold
+    "delta_exit_threshold": 0.25,  # Close if |combined_delta| > 0.25
 }
 
 # Weekly expiry mapping: NSE weekly options expire on Tuesday
@@ -226,8 +237,53 @@ NIFTY_SPOT_TOKEN = "99926000"
 BOT_DIR = Path(__file__).parent.resolve()
 
 def order_qty():
-    """Total quantity to trade = lot_size × position_lots."""
+    """Total quantity to trade = lot_size × position_lots. Static for now; see vix_adjusted_lots() for dynamic sizing."""
     return CONFIG["lot_size"] * CONFIG["position_lots"]
+
+def vix_adjusted_lots(vix=None):
+    """
+    Dynamic position sizing based on VIX regime.
+    Returns number of lots to trade.
+    """
+    if vix is None:
+        vix = get_india_vix()
+    if vix is None:
+        return CONFIG["position_lots"]  # fallback
+    
+    if vix >= CONFIG["viy_threshold"]:
+        return 0  # skip
+    elif vix < 14:
+        return CONFIG["vix_low_lots"]
+    elif vix < 18:
+        return CONFIG["vix_mid_lots"]
+    elif vix < 22:
+        return CONFIG["vix_high_lots"]
+    else:
+        return 1  # VIX 22-25: trade minimum
+
+def approx_delta(spot, strike, dte, vol, otype="call"):
+    """
+    Quick Black-Scholes delta approximation for exit threshold monitoring.
+    Uses simplified BS — accurate enough for magnitude checks.
+    """
+    if dte <= 0 or vol <= 0:
+        return 0
+    
+    t = dte / 365.0
+    if t <= 0:
+        return 0
+    
+    import math
+    sigma = vol * math.sqrt(t)
+    if sigma <= 0:
+        return 0
+    
+    d1 = math.log(spot / strike) / sigma + sigma / 2.0
+    
+    if otype == "call":
+        return norm_cdf(d1)
+    else:
+        return -norm_cdf(-d1)  # Put delta is negative
 
 # ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
 # CREDENTIALS
@@ -327,15 +383,38 @@ def get_nifty_spot(obj):
     return float(d['Close'].values.flatten()[-1])
 
 
-def get_volatility():
-    """Estimate Nifty daily volatility. Returns blended vol."""
-    d = yf.download('^NSEI', period='180d', interval='1d', progress=False, auto_adjust=True)
-    s = pd.Series(d['Close'].values.flatten())
-    log_ret = np.log(s / s.shift(1))
-    full_vol = float(log_ret.std())
-    recent = log_ret.tail(20)
-    recent_vol = float(recent.std()) if len(recent) > 5 else full_vol
-    return 0.6 * full_vol + 0.4 * recent_vol
+def get_volatility_ewma(lam=0.94):
+    """
+    EWMA volatility estimate (RiskMetrics).
+    λ=0.94 → half-life ~11 days — responds to vol regime changes quickly.
+    Falls back to blended vol if EWMA errors.
+    """
+    try:
+        d = yf.download('^NSEI', period='180d', interval='1d', progress=False, auto_adjust=True)
+        prices = d['Close'].values.flatten()
+        log_ret = np.diff(np.log(prices))
+        
+        # EWMA variance
+        var = np.var(log_ret)  # initial estimate
+        for r in log_ret:
+            var = lam * var + (1 - lam) * r * r
+        
+        ewma_vol = float(np.sqrt(var))
+        
+        # Blend with recent 20-day for stability (20% weight)
+        recent_vol = float(np.std(log_ret[-20:])) if len(log_ret) > 20 else ewma_vol
+        blended = 0.8 * ewma_vol + 0.2 * recent_vol
+        
+        return blended
+    except Exception:
+        # Fallback to original blended vol
+        d = yf.download('^NSEI', period='180d', interval='1d', progress=False, auto_adjust=True)
+        s = pd.Series(d['Close'].values.flatten())
+        log_ret = np.log(s / s.shift(1))
+        full_vol = float(log_ret.std())
+        recent = log_ret.tail(20)
+        recent_vol = float(recent.std()) if len(recent) > 5 else full_vol
+        return 0.6 * full_vol + 0.4 * recent_vol
 
 
 def get_option_ltp(obj, token):
@@ -405,17 +484,23 @@ def find_next_expiry(nfo):
 
 def calc_strikes(spot, vol, dte, obj, nfo, best_exp):
     """
-    Premium-targeted strike selection: scan strikes around 2σ anchor,
-    pick the pair where each leg yields ₹8-25 and premiums are balanced.
+    Premium-targeted strike selection with SKEW adjustment:
+    Puts trade richer → put anchor pushed further OTM by skew_factor.
+    Calls trade cheaper → call anchor stays closer.
     
     Returns (put_strike, call_strike, sd, put_ltp, call_ltp, total_credit).
-    Falls back to standard 2σ if premium check fails.
+    Falls back to symmetric 2σ if premium check fails.
     """
-    sd = spot * vol * math.sqrt(dte)
+    skew = CONFIG["skew_base"]  # e.g. 0.08 → put anchor 8% wider
     
-    # Anchor: standard 2σ strikes (rounded to 50)
-    anchor_put = round((spot - sd * CONFIG["std_dev"]) / CONFIG["strike_rounding"]) * CONFIG["strike_rounding"]
-    anchor_call = round((spot + sd * CONFIG["std_dev"]) / CONFIG["strike_rounding"]) * CONFIG["strike_rounding"]
+    # Asymmetric sigma: put gets wider buffer, call stays standard
+    put_sd = spot * vol * math.sqrt(dte) * (CONFIG["std_dev"] + skew)
+    call_sd = spot * vol * math.sqrt(dte) * (CONFIG["std_dev"] - skew)
+    sd = (put_sd + call_sd) / 2  # average for reporting
+    
+    # Anchors
+    anchor_put = round((spot - put_sd) / CONFIG["strike_rounding"]) * CONFIG["strike_rounding"]
+    anchor_call = round((spot + call_sd) / CONFIG["strike_rounding"]) * CONFIG["strike_rounding"]
     
     # Search range: ±σ range around anchor
     search_sd = spot * vol * math.sqrt(dte) * CONFIG["vol_smile_search"]
@@ -634,10 +719,14 @@ def run_entry_check():
     if state["status"] != "NO_POSITION":
         return {"action": "SKIP", "reason": f"Already in position ({state['status']})"}
     
-    # VIX check
+    # VIX check + dynamic sizing
     vix = get_india_vix()
-    if vix is not None and vix > CONFIG["vix_threshold"]:
-        return {"action": "SKIP", "reason": f"VIX {vix:.1f} > {CONFIG['vix_threshold']}, skipping"}
+    if vix is not None and vix > CONFIG["viy_threshold"]:
+        return {"action": "SKIP", "reason": f"VIX {vix:.1f} > {CONFIG['viy_threshold']}, skipping"}
+    
+    actual_lots = vix_adjusted_lots(vix)
+    if actual_lots == 0:
+        return {"action": "SKIP", "reason": f"VIX {vix:.1f}: vix_adjusted_lots returned 0"}
     
     # Event risk check — skip if critical event within next 2 days
     events = check_event_risk()
@@ -653,14 +742,14 @@ def run_entry_check():
     spot = get_nifty_spot(obj)
     
     # Volatility
-    vol = get_volatility()
+    vol = get_volatility_ewma()
     
     # Expiry
     best_exp, dte = find_next_expiry(nfo)
     if best_exp is None:
         return {"action": "ERROR", "reason": "No valid expiry found"}
     
-    # Strikes — premium-targeted (returns live LTPs too)
+    # Strikes — premium-targeted with EWMA vol + skew adjustment
     expiry_str = best_exp.strftime("%d%b%Y").upper()
     chain = nfo[(nfo["name"]=="NIFTY") & (nfo["instrumenttype"]=="OPTIDX") & (nfo["exp_dt"]==best_exp)]
     put_stk, call_stk, sd, put_ltp, call_ltp, total_credit = calc_strikes(spot, vol, dte, obj, nfo, best_exp)
@@ -682,11 +771,13 @@ def run_entry_check():
     if risk["ev_per_share"] <= 0:
         return {"action": "SKIP", "reason": f"Negative expectancy: Rs {risk['ev_per_share']:.2f}/share"}
     
+    entry_qty = CONFIG["lot_size"] * actual_lots
+    
     # Place orders
     put_order = place_order(obj, put_symbol, strikes["put_token"], 
-                            order_qty(), "SELL")
+                            entry_qty, "SELL")
     call_order = place_order(obj, call_symbol, strikes["call_token"],
-                             order_qty(), "SELL")
+                             entry_qty, "SELL")
     
     now = datetime.now()
     
@@ -773,15 +864,27 @@ def run_monitor():
     is_expiry_day = dte <= 0 and now.weekday() == CONFIG["expiry_weekday"]
     market_closing = now.hour == 15 and now.minute >= 20
     
+    # Compute deltas for delta-based exit threshold
+    put_delta = approx_delta(spot, state["put_strike"], dte, 0.01, "put")
+    call_delta = approx_delta(spot, state["call_strike"], dte, 0.01, "call")
+    combined_delta = abs(put_delta + call_delta)
+    
     # ─── DECISION TREE ───
     reason = None
     close_orders = None
     
-    # 0. EVENT RISK — pre-close if macro event will gap the market
-    events = check_event_risk()
-    should_close, event_reason = should_pre_close(events, spot, state["put_strike"], state["call_strike"])
-    if should_close:
-        reason = event_reason
+    # 0. DELTA EXIT — combined delta exceeding threshold means gamma acceleration
+    if reason is None and dte > 0:
+        delta_exit = CONFIG["delta_exit_threshold"]
+        if combined_delta > delta_exit:
+            reason = f"DELTA_EXIT ({combined_delta:.2f} > {delta_exit})"
+    
+    # 0b. EVENT RISK — pre-close if macro event will gap the market
+    if reason is None:
+        events = check_event_risk()
+        should_close, event_reason = should_pre_close(events, spot, state["put_strike"], state["call_strike"])
+        if should_close:
+            reason = event_reason
     
     # 1. BREACH: spot at or outside strike
     if reason is None and spot >= state["call_strike"]:
@@ -1012,7 +1115,7 @@ if __name__ == "__main__":
         obj = angel_connect(creds)
         nfo = load_master(obj)
         spot = get_nifty_spot(obj)
-        vol = get_volatility()
+        vol = get_volatility_ewma()
         best_exp, dte = find_next_expiry(nfo)
         put_stk, call_stk, sd, put_ltp, call_ltp, total_credit = calc_strikes(spot, vol, dte, obj, nfo, best_exp)
         
