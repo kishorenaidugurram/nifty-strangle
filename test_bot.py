@@ -520,10 +520,13 @@ class TestEdgeCases(unittest.TestCase):
 
     def test_negative_expectancy_skip(self):
         """Entry should skip if expectancy is negative."""
-        # Very tight strikes near spot with high vol → negative EV
+        # Very tight strikes near spot with high vol → check EV
         risk = bot.compute_risk(23300, 23200, 23400, 15, 15, 0.03, 7)
-        # tight range + high vol → high prob of breach
-        self.assertLess(risk["ev_per_share"], 10)  # Not necessarily negative but close
+        # avg_win = 30 - 4.5 = 25.5, avg_loss = 75 - 30 = 45
+        # EV = 0.84*25.5 - 0.16*45 = ~14.2 — positive EV even tight range
+        self.assertGreater(risk["ev_per_share"], 0)
+        self.assertEqual(risk["avg_loss"], 45.0)  # correct: stop - credit
+        self.assertEqual(risk["avg_win"], 25.5)
 
     def test_vix_skip(self):
         """Entry should check VIX threshold (config uses 'viy_threshold')."""

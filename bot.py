@@ -663,7 +663,7 @@ def compute_risk(spot, put_strike, call_strike, put_ltp, call_ltp, vol, dte):
     stop_level = total_credit * CONFIG["stop_mult"]
     target_level = total_credit * CONFIG["profit_target_pct"]
     avg_win = total_credit - target_level
-    avg_loss = stop_level
+    avg_loss = stop_level - total_credit  # Net loss = cost to close - credit received
     
     # Expectancy
     ev_per_share = prob_in * avg_win - prob_out * avg_loss
@@ -813,6 +813,7 @@ def run_entry_check():
         "last_premium": total_credit,
         "last_spot": spot,
         "last_check": now.isoformat(),
+        "entry_qty": entry_qty,  # save actual qty used for close later
     }
     
     write_state(new_state)
@@ -864,9 +865,10 @@ def run_monitor():
     is_expiry_day = dte <= 0 and now.weekday() == CONFIG["expiry_weekday"]
     market_closing = now.hour == 15 and now.minute >= 20
     
-    # Compute deltas for delta-based exit threshold
-    put_delta = approx_delta(spot, state["put_strike"], dte, 0.01, "put")
-    call_delta = approx_delta(spot, state["call_strike"], dte, 0.01, "call")
+    # Compute deltas for delta-based exit threshold (use EWMA vol)
+    ewma_vol = get_volatility_ewma()
+    put_delta = approx_delta(spot, state["put_strike"], dte, ewma_vol, "put")
+    call_delta = approx_delta(spot, state["call_strike"], dte, ewma_vol, "call")
     combined_delta = abs(put_delta + call_delta)
     
     # ─── DECISION TREE ───
@@ -909,8 +911,9 @@ def run_monitor():
     
     # Execute close if triggered
     if reason:
-        put_qty = order_qty()
-        call_qty = order_qty()
+        close_qty = state.get("entry_qty", order_qty())
+        put_qty = close_qty
+        call_qty = close_qty
         
         put_close = place_order(obj, state["put_symbol"], state["put_token"],
                                 put_qty, "BUY")  # Buy to close
@@ -920,7 +923,7 @@ def run_monitor():
         # Calculate P&L
         exit_premium = put_ltp + call_ltp
         pnl_per_share = total_credit - exit_premium
-        pnl_total = pnl_per_share * order_qty()
+        pnl_total = pnl_per_share * close_qty
         
         # Log trade
         trade_data = {
@@ -1002,13 +1005,14 @@ def run_force_close(reason="MANUAL"):
     total_credit = state["total_credit"]
     
     pnl_per_share = total_credit - exit_premium
-    pnl_total = pnl_per_share * order_qty()
+    close_qty = state.get("entry_qty", order_qty())
+    pnl_total = pnl_per_share * close_qty
     
     # Close both legs
     place_order(obj, state["put_symbol"], state["put_token"],
-                order_qty(), "BUY")
+                close_qty, "BUY")
     place_order(obj, state["call_symbol"], state["call_token"],
-                order_qty(), "BUY")
+                close_qty, "BUY")
     
     trade_data = {
         "entry_date": state["entry_time"],
