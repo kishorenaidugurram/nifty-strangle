@@ -31,10 +31,10 @@ import requests
 # ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
 
 CONFIG = {
-    "std_dev": 2.0,          # 2σ strikes
+    "std_dev": 2.0,          # Starting anchor (strikes searched ±0.5σ around this)
     "stop_mult": 2.5,        # Close when premium reaches 2.5× credit
     "profit_target_pct": 0.15,  # Book when 15% credit remains (85% profit)
-    "lot_size": 65,          # Nifty weekly lot (confirmed: Angel One position data shows lotsize=65)
+    "lot_size": 65,          # Nifty weekly lot
     "strike_rounding": 50,   # Nifty strikes every 50 pts
     "entry_hour": 15,        # 3 PM
     "entry_minute": 25,      # 25 minutes
@@ -50,6 +50,11 @@ CONFIG = {
     "state_file": "state.json",
     "trade_log": "trade_log.csv",
     "angel_env": "/mnt/c/Users/Admin/Documents/Claude/Projects/NSE_PCS_CCS_TO_BE_DEPLOYED/.env",
+    # Premium-targeted strike selection (replaces fixed 2σ)
+    "premium_target_min": 8,    # Minimum ₹ per leg (avoid too-thin options)
+    "premium_target_max": 25,   # Maximum ₹ per leg (avoid overpriced)
+    "premium_balance_pct": 30,  # Max % difference between leg premiums
+    "vol_smile_search": 0.5,    # ±σ range to search around anchor
 }
 
 # Weekly expiry mapping: NSE weekly options expire on Tuesday
@@ -232,14 +237,98 @@ def find_next_expiry(nfo):
     return best_exp, best_dte
 
 
-def calc_strikes(spot, vol, dte):
-    """Calculate 2σ put and call strikes, rounded to 50."""
+def calc_strikes(spot, vol, dte, obj, nfo, best_exp):
+    """
+    Premium-targeted strike selection: scan strikes around 2σ anchor,
+    pick the pair where each leg yields ₹8-25 and premiums are balanced.
+    
+    Returns (put_strike, call_strike, sd, put_ltp, call_ltp, total_credit).
+    Falls back to standard 2σ if premium check fails.
+    """
     sd = spot * vol * math.sqrt(dte)
-    put_raw = spot - sd * CONFIG["std_dev"]
-    call_raw = spot + sd * CONFIG["std_dev"]
-    put_stk = round(put_raw / CONFIG["strike_rounding"]) * CONFIG["strike_rounding"]
-    call_stk = round(call_raw / CONFIG["strike_rounding"]) * CONFIG["strike_rounding"]
-    return put_stk, call_stk, sd
+    
+    # Anchor: standard 2σ strikes (rounded to 50)
+    anchor_put = round((spot - sd * CONFIG["std_dev"]) / CONFIG["strike_rounding"]) * CONFIG["strike_rounding"]
+    anchor_call = round((spot + sd * CONFIG["std_dev"]) / CONFIG["strike_rounding"]) * CONFIG["strike_rounding"]
+    
+    # Search range: ±σ range around anchor
+    search_sd = spot * vol * math.sqrt(dte) * CONFIG["vol_smile_search"]
+    search_pts = int(round(search_sd / 50) * 50)  # round to nearest 50
+    
+    low_put = round((anchor_put - search_pts) / 50) * 50
+    high_call = round((anchor_call + search_pts) / 50) * 50
+    
+    # Scan the chain for live premiums
+    chain = nfo[(nfo["name"]=="NIFTY") & (nfo["instrumenttype"]=="OPTIDX") & (nfo["exp_dt"]==best_exp)]
+    
+    # Batch-fetch all option LTPs in range (single API call per side)
+    put_strikes = []
+    call_strikes = []
+    put_tokens = {}
+    call_tokens = {}
+    
+    for _, row in chain.iterrows():
+        stk = int(row["stk"])
+        otype = row["symbol"][-2:]
+        tok = str(int(row["token"]))
+        if otype == "PE" and low_put <= stk <= spot:
+            put_strikes.append(stk)
+            put_tokens[stk] = tok
+        elif otype == "CE" and spot <= stk <= high_call:
+            call_strikes.append(stk)
+            call_tokens[stk] = tok
+    
+    put_strikes.sort(reverse=True)   # Highest strike first (closest to spot)
+    call_strikes.sort()              # Lowest strike first (closest to spot)
+    
+    # Fetch LTPs in batches
+    put_ltps = {}
+    call_ltps = {}
+    
+    for stk in put_strikes:
+        put_ltps[stk] = get_option_ltp(obj, put_tokens[stk])
+    for stk in call_strikes:
+        call_ltps[stk] = get_option_ltp(obj, call_tokens[stk])
+    
+    # Score each pair: balance = premium diff, ideal = total 16-50, legs = 8-25
+    best_score = -1
+    best_pair = None
+    
+    for ps in put_strikes:
+        if ps not in put_ltps or put_ltps[ps] == 0:
+            continue
+        pv = put_ltps[ps]
+        if pv < CONFIG["premium_target_min"] or pv > CONFIG["premium_target_max"]:
+            continue
+        
+        for cs in call_strikes:
+            if cs not in call_ltps or call_ltps[cs] == 0:
+                continue
+            cv = call_ltps[cs]
+            if cv < CONFIG["premium_target_min"] or cv > CONFIG["premium_target_max"]:
+                continue
+            
+            total = pv + cv
+            balance = min(pv, cv) / max(pv, cv) * 100  # higher = more balanced
+            
+            # Prefer balanced pairs within premium range
+            if balance >= (100 - CONFIG["premium_balance_pct"]):
+                # Preference: higher total credit is better, but balance matters more
+                score = total * (balance / 100)
+                if score > best_score:
+                    best_score = score
+                    best_pair = (ps, cs, pv, cv, total)
+    
+    if best_pair:
+        ps, cs, pv, cv, total = best_pair
+        return ps, cs, sd, pv, cv, total
+    
+    # Fallback: standard 2σ with live premiums
+    put_stk = anchor_put
+    call_stk = anchor_call
+    put_ltp = get_option_ltp(obj, put_tokens.get(put_stk, ""))
+    call_ltp = get_option_ltp(obj, call_tokens.get(call_stk, ""))
+    return put_stk, call_stk, sd, put_ltp, call_ltp, put_ltp + call_ltp
 
 
 def find_strikes_in_chain(chain, put_target, call_target):
@@ -398,32 +487,27 @@ def run_entry_check():
     if best_exp is None:
         return {"action": "ERROR", "reason": "No valid expiry found"}
     
-    # Strikes
-    put_stk, call_stk, sd = calc_strikes(spot, vol, dte)
+    # Strikes — premium-targeted (returns live LTPs too)
     expiry_str = best_exp.strftime("%d%b%Y").upper()
-    
-    # Find chain
     chain = nfo[(nfo["name"]=="NIFTY") & (nfo["instrumenttype"]=="OPTIDX") & (nfo["exp_dt"]==best_exp)]
+    put_stk, call_stk, sd, put_ltp, call_ltp, total_credit = calc_strikes(spot, vol, dte, obj, nfo, best_exp)
+    
+    # Find tokens for the selected strikes
     strikes = find_strikes_in_chain(chain, put_stk, call_stk)
     
     if not strikes["put_token"] or not strikes["call_token"]:
         return {"action": "ERROR", "reason": "Required strikes not found in chain"}
     
-    # Get live premiums
-    put_ltp = get_option_ltp(obj, strikes["put_token"])
-    call_ltp = get_option_ltp(obj, strikes["call_token"])
-    total_credit = put_ltp + call_ltp
+    # Build option symbols
+    put_symbol = f"NIFTY{expiry_str}{strikes['put_strike']}PE"
+    call_symbol = f"NIFTY{expiry_str}{strikes['call_strike']}CE"
     
-    # Risk check
+    # Risk check (use live premiums from calc_strikes)
     risk = compute_risk(spot, strikes["put_strike"], strikes["call_strike"], 
                         put_ltp, call_ltp, vol, dte)
     
     if risk["ev_per_share"] <= 0:
         return {"action": "SKIP", "reason": f"Negative expectancy: Rs {risk['ev_per_share']:.2f}/share"}
-    
-    # Build option symbols
-    put_symbol = f"NIFTY{expiry_str}{strikes['put_strike']}PE"
-    call_symbol = f"NIFTY{expiry_str}{strikes['call_strike']}CE"
     
     # Place orders
     put_order = place_order(obj, put_symbol, strikes["put_token"], 
@@ -738,16 +822,13 @@ if __name__ == "__main__":
         spot = get_nifty_spot(obj)
         vol = get_volatility()
         best_exp, dte = find_next_expiry(nfo)
-        put_stk, call_stk, sd = calc_strikes(spot, vol, dte)
+        put_stk, call_stk, sd, put_ltp, call_ltp, total_credit = calc_strikes(spot, vol, dte, obj, nfo, best_exp)
         
         if best_exp:
             chain = nfo[(nfo["name"]=="NIFTY") & (nfo["instrumenttype"]=="OPTIDX") & (nfo["exp_dt"]==best_exp)]
             strikes = find_strikes_in_chain(chain, put_stk, call_stk)
-            put_ltp = get_option_ltp(obj, strikes["put_token"]) if strikes["put_token"] else 0
-            call_ltp = get_option_ltp(obj, strikes["call_token"]) if strikes["call_token"] else 0
         else:
             strikes = {"put_strike": put_stk, "call_strike": call_stk, "put_token": None, "call_token": None}
-            put_ltp = call_ltp = 0
         
         risk = compute_risk(spot, strikes["put_strike"], strikes["call_strike"], put_ltp, call_ltp, vol, dte)
         
