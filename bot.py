@@ -728,7 +728,7 @@ def run_entry_check():
     if actual_lots == 0:
         return {"action": "SKIP", "reason": f"VIX {vix:.1f}: vix_adjusted_lots returned 0"}
     
-    # Event risk check — skip if critical event within next 2 days
+    # Event risk check — skip if critical event within next 1 day
     events = check_event_risk()
     critical = [e for e in events if e["risk"] in ("CRITICAL", "HIGH") and e["days_until"] <= 1]
     if critical:
@@ -779,6 +779,23 @@ def run_entry_check():
     call_order = place_order(obj, call_symbol, strikes["call_token"],
                              entry_qty, "SELL")
     
+    # ⚠️ Verify both orders succeeded before saving state
+    put_order_id = put_order.get("data", {}).get("orderid", "") if put_order else ""
+    call_order_id = call_order.get("data", {}).get("orderid", "") if call_order else ""
+    
+    if not put_order_id and not call_order_id:
+        return {"action": "ERROR", "reason": "Both orders failed — check Angel One IP whitelisting or connectivity"}
+    if not put_order_id:
+        # Call was placed but put failed — cancel call to avoid naked leg
+        if call_order_id:
+            cancel_order(obj, call_order_id)
+        return {"action": "ERROR", "reason": f"Put order failed (call cancelled). {put_order}"}
+    if not call_order_id:
+        # Put was placed but call failed — cancel put to avoid naked leg
+        if put_order_id:
+            cancel_order(obj, put_order_id)
+        return {"action": "ERROR", "reason": f"Call order failed (put cancelled). {call_order}"}
+    
     now = datetime.now()
     
     # Save state
@@ -803,8 +820,8 @@ def run_entry_check():
         "avg_win": risk["avg_win"],
         "avg_loss": risk["avg_loss"],
         "ev_per_lot": risk["ev_per_lot"],
-        "put_order_id": put_order.get("data", {}).get("orderid", "") if put_order else "",
-        "call_order_id": call_order.get("data", {}).get("orderid", "") if call_order else "",
+        "put_order_id": put_order_id,
+        "call_order_id": call_order_id,
         "exit_time": None,
         "exit_reason": None,
         "exit_spot": None,
