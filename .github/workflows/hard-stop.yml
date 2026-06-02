@@ -31,7 +31,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install yfinance pandas numpy requests SmartApi pyotp
+          pip install yfinance pandas numpy requests SmartApi pyotp --break-system-packages
 
       - name: Check position and market stress
         id: check

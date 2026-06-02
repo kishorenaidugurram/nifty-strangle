@@ -27,7 +27,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install yfinance pandas numpy requests SmartApi pyotp gtts
+          pip install yfinance pandas numpy requests SmartApi pyotp gtts --break-system-packages
 
       - name: Create .env.txt from secrets
         run: |

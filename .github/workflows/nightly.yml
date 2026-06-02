@@ -25,7 +25,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install yfinance pandas numpy requests
+          pip install yfinance pandas numpy requests --break-system-packages
 
       - name: Generate status report
         id: report

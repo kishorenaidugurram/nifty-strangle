@@ -30,7 +30,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install yfinance pandas numpy requests SmartApi pyotp
+          pip install yfinance pandas numpy requests SmartApi pyotp --break-system-packages
 
       - name: Run entry check
         id: entry
