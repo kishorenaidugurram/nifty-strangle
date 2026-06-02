@@ -35,6 +35,36 @@ DEFAULT_DAILY_VOL = 0.0092
 # Cache for support/resistance levels
 _sr_cache = {}
 
+def send_audio_alert(messages):
+    """Generate TTS and send as voice message to Telegram for critical alerts."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        # Pick the first critical/warning message
+        for level, msg in messages:
+            if level in ("CRITICAL", "WARNING"):
+                lines = msg.split("\n")
+                ticker_line = [l for l in lines if "*" in l]
+                ticker = ticker_line[0].replace("*","").strip() if ticker_line else "portfolio"
+                
+                tts_text = f"{level} alert for {ticker}. {msg[:100]}"
+                
+                # Use gTTS (works in GH Actions, no audio hardware needed)
+                from gtts import gTTS
+                tts = gTTS(text=tts_text[:300], lang="en", slow=False)
+                temp_path = "/tmp/portfolio_alert.mp3"
+                tts.save(temp_path)
+                
+                import requests as rq
+                with open(temp_path, 'rb') as f:
+                    rq.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice",
+                           data={"chat_id": TELEGRAM_CHAT_ID}, files={"voice": f}, timeout=15)
+                break
+    except ImportError:
+        print("  ⚠ gTTS not installed — skipping audio alert")
+    except Exception as e:
+        print(f"  ⚠ Audio alert error: {e}")
+
 def get_volume_by_price(name):
     """
     Volume by Price (VbP): bin price into 1% buckets and sum volume.
