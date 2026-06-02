@@ -29,6 +29,23 @@ jobs:
         run: |
           pip install yfinance pandas numpy requests SmartApi pyotp
 
+      - name: Create .env.txt from secrets
+        run: |
+          cat > .env.txt << 'EOF'
+          ANGEL_API_KEY=${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE=${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN=${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET=${{ secrets.ANGEL_TOTP_SECRET }}
+          EOF
+
+      - name: Monitor all positions
+        env:
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+        run: python monitor_all.py
+
       - name: Run monitor
         id: monitor
         env:
